@@ -6,12 +6,13 @@ from observability import setup_logger, trace_intent_outcome
 logger = setup_logger("PersistentMemory")
 
 class PersistentMemory:
-    """Provides SQL-backed persistent long-term storage and conversational context management."""
+    """Manages long-term user preferences and conversation history using SQLite."""
     def __init__(self, db_path="agent_memory.db"):
         self.db_path = db_path
         self._init_db()
         
     def _init_db(self):
+        """Initializes tables for persistent user preferences and turn histories."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -35,6 +36,7 @@ class PersistentMemory:
             
     @trace_intent_outcome(logger)
     def get_preferences(self, user_id: str = "user_default") -> Dict[str, str]:
+        """Retrieves persistent user profile preferences."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT email, default_topic, digest_format FROM user_preferences WHERE user_id = ?", (user_id,))
@@ -47,6 +49,7 @@ class PersistentMemory:
                 
     @trace_intent_outcome(logger)
     def save_preferences(self, user_id: str, email: str, default_topic: str, digest_format: str) -> None:
+        """Saves or updates user preferences in SQLite."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -57,6 +60,7 @@ class PersistentMemory:
 
     @trace_intent_outcome(logger)
     def load_history(self, session_id: str) -> List[Dict[str, str]]:
+        """Loads chronological conversation history for a session."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT role, content FROM conversation_history WHERE session_id = ? ORDER BY id ASC", (session_id,))
@@ -64,6 +68,7 @@ class PersistentMemory:
 
     @trace_intent_outcome(logger)
     def save_message(self, session_id: str, role: str, content: str) -> None:
+        """Persists a single message turn."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -73,8 +78,8 @@ class PersistentMemory:
             conn.commit()
 
     @trace_intent_outcome(logger)
-    def compact_history(self, session_id: str, max_turns: int = 5) -> None:
-        """Compacts older messages in context into a summarized state to avoid model token limits."""
+    def compact_history(self, session_id: str, max_turns: int = 4) -> None:
+        """Synchronous compaction logic that summarizes older turns into a unified context block."""
         history = self.load_history(session_id)
         if len(history) <= max_turns:
             return
@@ -84,10 +89,10 @@ class PersistentMemory:
         summary_items = []
         for turn in to_summarize:
             role = turn["role"]
-            content = turn["content"][:30] + "..." if len(turn["content"]) > 30 else turn["content"]
+            content = turn["content"][:40] + "..." if len(turn["content"]) > 40 else turn["content"]
             summary_items.append(f"{role}: {content}")
         
-        summary_content = "Summary of previous context: " + " | ".join(summary_items)
+        summary_content = "Summary of previous dialogue context: " + " | ".join(summary_items)
         
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -98,17 +103,26 @@ class PersistentMemory:
         for turn in keep:
             self.save_message(session_id, turn["role"], turn["content"])
             
-        logger.info(f"History compacted for session '{session_id}'. Compressed {len(to_summarize)} turns.")
+        logger.info(f"History compacted for session '{session_id}'. Summarized {len(to_summarize)} turns.")
 
-class AsyncMemoryWrapper:
-    """Asynchronous wrapper ensuring SQLite actions are executed non-blocking on separate executors."""
-    def __init__(self, sync_memory: PersistentMemory):
-        self.sync_memory = sync_memory
+class AsyncMemoryManager:
+    """Asynchronous wrapper ensuring database transactions and compaction run non-blockingly."""
+    def __init__(self, db_path="agent_memory.db"):
+        self.sync_memory = PersistentMemory(db_path)
         
     async def get_preferences_async(self, user_id: str = "user_default") -> Dict[str, str]:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self.sync_memory.get_preferences, user_id)
         
     async def save_preferences_async(self, user_id: str, email: str, default_topic: str, digest_format: str) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self.sync_memory.save_preferences, user_id, email, default_topic, digest_format)
+
+    async def save_message_async(self, session_id: str, role: str, content: str) -> None:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.sync_memory.save_message, session_id, role, content)
+
+    async def compact_history_async(self, session_id: str, max_turns: int = 4) -> None:
+        """Executes context compaction asynchronously as a background task."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.sync_memory.compact_history, session_id, max_turns)

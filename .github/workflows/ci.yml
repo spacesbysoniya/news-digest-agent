@@ -22,10 +22,21 @@ jobs:
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pytest feedparser pydantic google-cloud-vertexai
+        pip install pytest feedparser pydantic>=2.0.0 google-cloud-secret-manager opentelemetry-api
 
-    - name: Run Unit & ADK Trajectory Evals
+    - name: Run Unit & Golden Dataset Evaluation Harness
       env:
-        GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        AGENT_HITL_APPROVED: "True"
+        GOOGLE_CLOUD_PROJECT: "mock-project"
       run: |
-        pytest test_agent.py -v
+        pytest news-digest-agent/test_agent.py -v
+
+    - name: Terraform Validate
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.5.0
+    - name: Terraform Init & Validate
+      run: |
+        cd news-digest-agent
+        terraform init -backend=false
+        terraform validate
